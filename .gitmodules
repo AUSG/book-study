@@ -1,0 +1,9 @@
+[submodule "2023-clean-architecture"]
+	path = 2023-clean-architecture
+	url = https://github.com/AUSG/2023-clean-architecture
+[submodule "2023-unit-testing"]
+	path = 2023-unit-testing
+	url = https://github.com/AUSG/2023-unit-testing
+[submodule "2023-progmatic-programmer"]
+	path = 2023-progmatic-programmer
+	url = https://github.com/AUSG/2023-progmatic-programmer
