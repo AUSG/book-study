@@ -3,7 +3,34 @@
 A Philosophy Of Software Design를 함께 읽자.
 
 ## 진행 상황
+- [1주차](https://github.com/AUSG/2023-book-study/tree/main/2023-a-philosophy-of-software-design/01%EC%A3%BC%EC%B0%A8)
+  - 1장 Introduction
+  - 2장 The Nature of Complexity
+  - 3장 Working Code Isn't Enough
+  - 4장 Modules Should Be Deep
+  - 5장 Information Hiding (and Leakage)
 
+- [2주차](https://github.com/AUSG/2023-book-study/tree/main/2023-a-philosophy-of-software-design/02%EC%A3%BC%EC%B0%A8)
+  - 6장 General-Purpose Modules are Deeper
+  - 7장 Different Later, Different Abstraction
+  - 8장 Pull Complexity Downwards
+  - 9장 Better Together Or Better Apart?
+  
+- [3주차](https://github.com/AUSG/2023-book-study/tree/main/2023-a-philosophy-of-software-design/03%EC%A3%BC%EC%B0%A8)
+  - 10장 Define Errors Out Of Existence
+  - 11장 Design it Twice
+  - 12장 Why Write Comments? The Four Execuses
+  - 13장 Comments Should Describe Things that Aren't Obvious from the Code
+  - 14장 Choosing Names
+
+- [4주차](https://github.com/AUSG/2023-book-study/tree/main/2023-a-philosophy-of-software-design/04%EC%A3%BC%EC%B0%A8)
+  - 15장 Write The Comments First (Use Comments As Part Of The Design Process)
+  - 16장 Modifying Existing Code
+  - 17장 Consistency
+  - 18장 Code Should be Obvious
+  - 19장 Software Trends
+  - 20장 Designing for Performance
+  - 21장 Conclusion
 
 ## 스터디 룰
 
