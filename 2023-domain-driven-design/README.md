@@ -3,7 +3,7 @@
 도메인 주도 설계를 함께 읽자.
 
 ## 진행 상황
-- 1주차
+- [1주차](https://github.com/AUSG/2023-book-study/tree/main/2023-domain-driven-design/01%EC%A3%BC%EC%B0%A8)
   - 1부 동작하는 도메인 모델 만들기
     - 1장_지식 탐구
     - 2장_의사소통과 언어 사용
