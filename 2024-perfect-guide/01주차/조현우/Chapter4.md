@@ -64,6 +64,7 @@
 - 커넥션을 맺기 위한 사전 작업과 지연을 줄여주고, 튜닝된 커넥션을 유지하며, 커넥션의 수를 줄여준다.
 - 하지만 잘못 관리할 경우 게속 연결된 상태로 있는 수많은 커넥션이 쌓이게 될 것이다.
 - `Keep-Alive` 헤더 사용을 통해 지속 커넥션을 사용할 수 있다.
+- GRPC의 [Keepalive](https://grpc.io/docs/guides/keepalive/)
 
 ## 파이프라인 커넥션
 ![img_4.png](image/4_img_4.png)
