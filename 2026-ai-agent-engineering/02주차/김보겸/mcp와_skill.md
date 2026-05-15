@@ -1,0 +1,482 @@
+# MCP와 Skills
+
+## Model Context Protocol (MCP)
+
+- MCP는 AI 모델이 외부 데이터 소스와 도구에 접근할 수 있도록 하는 개방형 표준 프로토콜이다. 
+- JSON-RPC 기반으로 설계. AI 에이전트가 파일 시스템, DB, SaaS 서비스 등 외부 시스템과 통신할 수 있는 표준화된 인터페이스 제공
+- AI 모델에게 "이 도구를 이렇게 호출하면 이런 결과를 얻을 수 있어"라고 알려주는 것
+    - 예를 들어 `read_file`, `query_database`, `send_slack_message` 같은 도구를 정의
+    - 각 도구의 파라미터와 반환값을 JSON Schema로 기술
+    - AI 모델은 대화 중 필요할 때 자율적으로 이 도구들을 호출
+
+### MCP의 아키텍처
+
+MCP는 클라이언트-서버 아키텍처를 따름
+
+```
+┌─────────────┐     JSON-RPC     ┌─────────────────┐     API/SDK     ┌──────────────┐
+│  AI Agent   │ ◄──────────────► │   MCP Server    │ ◄─────────────► │ External     │
+│  (Client)   │    stdio/HTTP    │  (Tool Provider)│                 │ Service      │
+└─────────────┘                  └─────────────────┘                 └──────────────┘
+```
+
+- **MCP Client**: AI 에이전트 내부에 내장되어 사용 가능한 도구 목록을 서버로부터 받아오고 도구 호출 결과 처리
+- **MCP Server**: 특정 외부 서비스(GitHub, Grafana, Slack 등)에 대한 접근을 제공하는 프로세스. 각 서버는 자신이 제공하는 도구의 이름, 설명, 파라미터 스키마를 노출
+- **Transport Layer**: 초기에는 stdio 기반이었으나, 2025년부터 Streamable HTTP로 확장되어 원격 서버 연결도 지원
+
+### MCP의 동작 방식
+
+- MCP 서버가 AI 에이전트에 연결되면 서버가 제공하는 모든 도구의 정의(이름, 설명, JSON Schema)가 에이전트의 컨텍스트 윈도우에 로드
+- 에이전트는 사용자의 요청을 처리하면서 필요한 도구를 자율적으로 선택하고 호출
+
+예를 들어, Grafana MCP 서버가 연결되면 `search_dashboards`, `get_dashboard_by_uid`, `list_datasources` 같은 도구 정의가 에이전트의 컨텍스트에 추가됨. 사용자가 "지난 주 API 응답 시간 추이를 보여줘"라고 요청하면, 에이전트는 스스로 판단하여 적절한 Grafana 도구를 호출
+
+---
+
+## 3. Agent Skills 이해하기
+
+### 3.1 Skills란 무엇인가
+
+- Skills는 AI 에이전트에게 **절차적 지식(procedural knowledge)**을 주입하는 메커니즘
+- MCP가 "무엇에 접근할 수 있는가(what can you access)"를 정의한다면, Skills는 "이 작업을 어떻게 수행해야 하는가(how should you approach this task)"를 정의
+
+- Skills는 본질적으로 프롬프트 기반의 컨텍스트 수정자(prompt-based context modifier)
+- 실행 가능한 코드가 아니라, AI 에이전트의 대화 컨텍스트에 전문 지식과 워크플로우 지침을 주입하여 에이전트의 행동 방식을 변경
+- 이것이 MCP와의 가장 근본적인 차이점
+
+### 3.2 Skills의 아키텍처
+
+Skills는 디렉토리 기반의 단순한 구조를 따름
+
+```
+my-skill/
+├── SKILL.md           # 필수: 메타데이터 + 지침 (YAML frontmatter + Markdown)
+├── scripts/           # 선택: 실행 가능한 스크립트
+├── references/        # 선택: 참조 문서
+├── assets/            # 선택: 템플릿, 리소스
+└── examples/          # 선택: 예제 출력
+```
+
+핵심은 `SKILL.md` 파일이다. YAML frontmatter로 메타데이터를 정의하고, Markdown 본문으로 에이전트가 따라야 할 지침을 기술
+
+```yaml
+---
+name: deploy
+description: 프로덕션 배포 수행. 배포, 릴리스, 프로덕션 반영 요청 시 사용.
+disable-model-invocation: true
+allowed-tools: Bash(git:*) Bash(docker:*)
+---
+
+# 배포 워크플로우
+
+1. 테스트 스위트 실행
+2. 애플리케이션 빌드
+3. 배포 타겟에 푸시
+4. 배포 성공 확인
+```
+
+### 3.3 Progressive Disclosure: Skills의 핵심 설계 원리
+
+- Skills 아키텍처의 가장 중요한 설계 원리는 **점진적 공개(Progressive Disclosure)**
+- 이것이 MCP의 컨텍스트 소비 문제를 해결하는 핵심 메커니즘
+
+정보는 3단계로 점진적으로 로드됨
+
+| 단계 | 로드되는 내용 | 토큰 비용 | 시점 |
+|------|-------------|----------|------|
+| **Discovery** | `name`과 `description`만 | ~100 토큰/스킬 | 세션 시작 시 항상 |
+| **Activation** | `SKILL.md` 전체 본문 | < 5,000 토큰 | 스킬이 호출될 때 |
+| **Execution** | `scripts/`, `references/` 등 | 필요한 만큼 | 실행 중 필요할 때 |
+
+- 50개의 스킬이 등록되어 있어도 세션 시작 시 소비하는 토큰은 약 5,000토큰(50 × ~100)에 불과
+- 반면 MCP에서 50개의 도구를 등록하면, 각 도구 정의가 550~1,400 토큰을 소비하므로 최소 27,500토큰이 사전에 소비됨
+
+### 3.4 Skills의 동작 방식
+
+스킬이 호출되면 내부적으로 두 개의 메시지가 대화 컨텍스트에 주입됨
+
+1. **메타데이터 메시지 (사용자에게 표시)**: 어떤 스킬이 로드되는지 알려주는 짧은 안내. 예: `"deploy" 스킬을 로드합니다.`
+2. **프롬프트 메시지 (모델에게만 전달)**: `SKILL.md`의 전체 본문. 워크플로우 지침, 도구 사용 규칙, 예상 출력 형식 등을 포함.
+
+- 이 이중 메시지 패턴은 투명성과 효율성을 동시에 달성
+- 사용자는 어떤 스킬이 활성화되었는지 알 수 있고, 수천 단어의 지침이 UI를 어지럽히지 않음
+
+### 3.5 Agent Skills 개방형 표준
+
+2025년 12월, Anthropic은 Agent Skills를 개방형 표준으로 발표
+스펙은 [agentskills.io](https://agentskills.io)에 공개되어 있으며, Microsoft, OpenAI, Atlassian, Figma, Cursor, GitHub 등이 이미 이 표준을 채택
+
+이는 Anthropic이 MCP를 개방형 표준으로 만들어 산업 인프라로 자리잡게 한 것과 동일한 전략
+독점적 생태계 대신 업계 표준을 구축하여, 특정 플랫폼에 종속되지 않는 이식 가능한(portable) 스킬을 만들 수 있게 함
+
+---
+
+## 4. 공통점
+
+### 4.1 AI 에이전트의 능력 확장
+
+- MCP와 Skills 모두 AI 에이전트가 기본 상태에서는 할 수 없는 일을 가능하게 만든다는 근본적 목표를 공유
+- 바닐라 LLM은 텍스트를 생성할 수 있을 뿐이지만, MCP는 외부 시스템과의 연결을, Skills는 도메인 전문 지식을 부여함으로써 에이전트를 범용 어시스턴트에서 전문 도구로 전환
+
+### 4.2 개방형 표준
+
+- 둘 다 Anthropic이 주도하여 개방형 표준으로 공개
+- MCP는 현재 Linux Foundation 거버넌스 하에 있고, Agent Skills는 agentskills.io에 스펙이 공개되어 있음
+- 특정 벤더에 종속되지 않으며, 여러 AI 플랫폼에서 동일한 형식을 사용할 수 있음
+
+### 4.3 선언적(Declarative) 정의
+
+- MCP의 도구 정의도, Skills의 SKILL.md도 모두 선언적으로 작성
+- MCP는 JSON Schema로 도구의 입출력을 기술하고, Skills는 Markdown으로 워크플로우를 기술
+- 에이전트가 이 정의를 읽고 자율적으로 판단하여 활용한다는 점에서, 명령형 프로그래밍이 아닌 선언형 접근이라는 공통점이 있음
+
+### 4.4 에이전트 자율성 (Agent Autonomy)
+
+- MCP와 Skills 모두 AI 에이전트의 자율적 판단에 의존
+- MCP에서 에이전트는 사용 가능한 도구 중 적절한 것을 스스로 선택하고, Skills에서 에이전트는 등록된 스킬 중 현재 상황에 맞는 것을 자동으로 활성화
+- 둘 다 인간이 매번 "이 도구를 사용해"라고 지시할 필요가 없도록 설계되어 있음
+
+### 4.5 조합 가능성 (Composability)
+
+- MCP 서버 여러 개를 동시에 연결할 수 있듯이, Skills도 여러 개를 동시에 사용할 수 있음
+- 더 나아가 Skills는 MCP 도구를 내부적으로 활용할 수 있어, 두 시스템이 함께 작동하는 하이브리드 패턴이 가능
+
+---
+
+## 5. 핵심 차이점
+
+### 5.1 역할의 차이: 능력(Capability) vs 지식(Knowledge)
+
+- 이것이 가장 근본적인 차이다.
+
+| 관점 | MCP | Skills |
+|------|-----|--------|
+| 제공하는 것 | 외부 시스템에 대한 **접근 능력** | 작업 수행에 대한 **절차적 지식** |
+| 핵심 질문 | "무엇에 접근할 수 있는가?" | "어떻게 접근해야 하는가?" |
+| 비유 | 공구 상자의 **공구** | 공구 사용 **매뉴얼** |
+| 없을 때 | 데이터베이스를 조회할 수 없다 | 조회는 가능하지만 어떤 순서로, 어떤 패턴으로 해야 하는지 모른다 |
+
+- MCP가 Grafana에 접속할 수 있게 해준다면, Skills는 "Grafana에서 지난 주 메트릭을 분석할 때는 먼저 데이터소스 연결을 확인하고, Prometheus에서 핵심 지표를 조회한 다음, Loki 로그와 상관관계를 분석하고, 발견사항을 구조화된 보고서로 정리하라"는 절차를 알려줌.
+
+### 5.2 컨텍스트 소비 모델
+
+- 이것이 실무에서 가장 큰 차이를 만드는 지점
+- MCP의 토큰 과소비는 단일 원인이 아니라, 세 가지 구조적 요인이 곱해지면서 발생하는 문제
+
+#### 요인 1: 도구 정의 자체가 장황하다
+
+- MCP 도구 하나가 모델에 전달되려면 이름, 설명, 파라미터 이름, 파라미터 설명, 타입, enum 값, 기본값, 필수 여부 등이 모두 JSON Schema로 기술되어야 함
+- 실제 도구 정의의 예시를 보면:
+
+```json
+{
+  "name": "get_dashboard_by_uid",
+  "description": "Retrieve a Grafana dashboard by its unique identifier. Returns the full
+    dashboard JSON including panels, variables, annotations, and templating configuration.
+    Use this to inspect dashboard structure or extract specific panel queries.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "uid": {
+        "type": "string",
+        "description": "The unique identifier of the dashboard (found in the dashboard
+          URL or from search results)"
+      },
+      "include_meta": {
+        "type": "boolean",
+        "description": "Whether to include metadata such as created/updated timestamps,
+          version, and folder info",
+        "default": true
+      }
+    },
+    "required": ["uid"]
+  }
+}
+```
+
+- 이것 하나가 대략 **550~1,400 토큰**을 소비
+- 파라미터가 많거나 enum 값이 포함된 복잡한 도구는 더 많은 토큰을 먹음
+
+#### 요인 2: 모든 도구가 항상 로드된다
+
+- MCP 서버가 연결되면 해당 서버의 **모든 도구 정의**가 컨텍스트에 로드됨
+- 모델이 "어떤 도구가 있는지" 알아야 자율적으로 선택할 수 있기 때문
+- 문제는 MCP 서버 하나가 보통 10~30개의 도구를 노출한다는 것:
+
+```
+GitHub MCP:       ~25개 도구 (issues, PRs, commits, repos, releases...)
+Slack MCP:        ~10개 도구 (send, search, channels, users...)
+Grafana MCP:      ~15개 도구 (dashboards, datasources, alerts, queries...)
+Atlassian MCP:    ~30개 도구 (issues, projects, transitions, comments...)
+───────────────────────────────────────────────────────────────────
+합계:              ~80개 도구
+토큰:              80 × ~1,000 ≈ 80,000 토큰
+```
+
+- 이 80,000 토큰은 **사용자가 아무 말도 하기 전에** 소비됨
+- "안녕"이라고 인사만 해도 이미 80,000 토큰이 날아간 상태에서 모델이 응답을 시작함
+- 실무 보고에 따르면 7개 MCP 서버가 67,300 토큰(200K 컨텍스트 윈도우의 33.7%)을 소비한 사례가 있으며, GitHub MCP 서버 하나만으로도 Claude Sonnet의 컨텍스트 윈도우의 약 25%를 차지하는 경우가 보고됨
+
+#### 요인 3: 매 턴마다 반복 전송된다
+
+- 여기가 비용이 폭발하는 핵심
+- LLM API는 **stateless**함. 모델은 이전 요청의 내용을 기억하지 않으므로, 매 API 호출마다 전체 대화 기록 + 시스템 프롬프트 + 모든 도구 정의를 처음부터 다시 보내야 함
+
+```
+[Turn 1]  시스템프롬프트(5K) + 도구정의(80K) + 사용자메시지(50)     = ~85K 토큰
+[Turn 2]  시스템프롬프트(5K) + 도구정의(80K) + 대화기록(2K)         = ~87K 토큰
+[Turn 3]  시스템프롬프트(5K) + 도구정의(80K) + 대화기록(5K)         = ~90K 토큰
+  ...
+[Turn 10] 시스템프롬프트(5K) + 도구정의(80K) + 대화기록(30K)        = ~115K 토큰
+```
+
+- 10턴 대화에서 도구 정의로만 소비된 입력 토큰: **80K × 10 = 800,000 토큰**
+- 실제 대화 내용은 총 30K에 불과한데, 도구 정의에 800K를 쓰게 되는 것
+- 이는 API 비용에도 직접적으로 반영됨
+
+#### Skills는 이 세 가지 문제를 어떻게 해결하는가
+
+- Skills의 **Progressive Disclosure**는 요인 2(항상 로드)를 구조적으로 제거함
+
+```
+[세션 시작]
+  50개 스킬 메타데이터: 50 × ~100 = 5,000 토큰 (이름+설명만)
+
+[사용자: "이 코드를 리뷰해줘"]
+  → /review-pr 스킬 매칭 → 전체 내용 로드: +3,000 토큰
+  → 이 턴 총: 8,000 토큰
+
+[사용자: "고마워, 다음 작업 할게"]
+  → /review-pr 컨텍스트에서 해제
+  → 다시 5,000 토큰만 (메타데이터)
+```
+
+- 수치로 비교하면 차이가 극적이다:
+
+```
+                          MCP (80개 도구)       Skills (50개 스킬)
+─────────────────────────────────────────────────────────────────
+세션 시작 시 고정 비용:      ~80,000 토큰          ~5,000 토큰
+도구/스킬 사용 시 추가 비용:  +0 (이미 로드됨)       +3,000~5,000 토큰 (필요한 것만)
+10턴 대화 누적 (도구 정의):   800,000+ 토큰         50,000~80,000 토큰
+비용 비율:                  1x                   약 1/10 ~ 1/16x
+```
+
+- 정리하면, MCP의 토큰 과소비는 **(1) 장황한 도구 정의 × (2) 전체 상시 로드 × (3) 매 턴 반복 전송**이라는 세 요인이 곱해져 발생하는 구조적 문제
+- Skills는 (2)를 Progressive Disclosure로 제거함으로써 동일한 수의 확장 기능을 등록하면서도 10~16배 적은 토큰을 소비함
+
+### 5.3 실행 모델의 차이
+
+| 측면 | MCP | Skills |
+|------|-----|--------|
+| 실행 방식 | 동기적 도구 호출 → 즉시 결과 반환 | 프롬프트 확장 → 에이전트 행동 변경 |
+| 반환값 | 구체적인 데이터 (JSON, 텍스트 등) | 없음 (컨텍스트가 변경될 뿐) |
+| 호출 단위 | 단일 도구, 단일 작업 | 멀티스텝 워크플로우 전체 |
+| 에이전트 관여도 | 도구 호출 자체는 에이전트가 관여하지 않음 | 모든 실행이 에이전트의 추론을 통해 이루어짐 |
+
+- MCP 도구는 함수 호출과 같음. `get_dashboard_by_uid("abc123")`을 호출하면 대시보드 데이터가 반환됨
+- 반면 Skills는 에이전트의 "마인드셋"을 변경함
+  - `/grafana-weekly`를 활성화하면 에이전트가 "나는 지금 주간 관측 가능성 분석을 수행하는 전문가"로서 행동하게 되고, 여러 MCP 도구를 조합하여 분석을 수행함
+
+### 5.4 정의와 관리 방식
+
+**MCP:**
+- 서버 프로세스를 실행해야 한다 (Go, Python, Node.js 등으로 구현)
+- 도구 정의는 코드로 작성된다 (JSON Schema)
+- 서버 바이너리의 빌드, 배포, 유지보수가 필요하다
+- 환경변수, 인증 정보 관리가 수반된다
+
+**Skills:**
+- Markdown 파일만 있으면 된다
+- 프로그래밍 언어 지식 없이도 작성 가능하다
+- 버전 관리 시스템(Git)으로 바로 관리할 수 있다
+- 디렉토리를 복사하는 것만으로 공유가 가능하다
+
+- 이 차이는 Skills의 접근성을 크게 높임
+- 개발자가 아닌 도메인 전문가도 자신의 워크플로우를 SKILL.md로 문서화하여 AI 에이전트에게 전달할 수 있음
+
+### 5.5 권한 범위 (Permission Scoping)
+
+**MCP:**
+- 서버 단위로 읽기/쓰기 모드를 설정한다 (`--disable-write` 플래그 등)
+- 도구별 세밀한 권한 제어가 어렵다
+- 연결된 동안 모든 도구가 항상 사용 가능하다
+
+**Skills:**
+- 스킬별로 `allowed-tools` 필드로 도구 접근을 제한할 수 있다
+- `disable-model-invocation`으로 자동 호출을 방지할 수 있다
+- 스킬 실행 중에만 권한이 적용되고, 종료 후에는 해제된다
+
+```yaml
+# 읽기 전용 분석 스킬: 파일 수정 불가
+---
+name: safe-analyzer
+allowed-tools: Read Grep Glob
+---
+```
+
+---
+
+## 6. 왜 MCP에서 Skills로 패러다임이 확장되는가
+
+### 6.1 컨텍스트 윈도우 위기 (The Context Window Crisis)
+
+MCP의 가장 심각한 실무적 문제는 컨텍스트 윈도우 소비
+- 2025~2026년에 걸쳐 수많은 엔지니어링 팀이 이 문제를 보고했다.
+
+- Apideck의 분석에 따르면, MCP 서버들이 연결되는 순간 에이전트가 실제 작업을 수행하기도 전에 컨텍스트 윈도우의 40~50%가 도구 정의에 소비되고 있었음
+- Scalekit의 벤치마크에서는 동일한 작업을 MCP로 수행할 때 CLI 대비 4~32배 더 많은 토큰을 소비
+
+이 문제가 심각한 이유는, 컨텍스트 윈도우가 곧 에이전트의 "작업 메모리"이기 때문
+- 도구 정의가 이 공간을 잠식하면 에이전트가 실제 작업에 사용할 수 있는 공간이 줄어들고, 이는 복잡한 작업에서 품질 저하로 직결됨
+
+Skills의 Progressive Disclosure는 이 문제에 대한 구조적 해답
+- 사용하지 않는 확장 기능은 사실상 토큰 비용이 0이므로, 수백 개의 스킬을 등록하더라도 컨텍스트 압박이 거의 없음
+
+### 6.2 도구의 한계: 접근은 가능하지만 방법을 모른다
+
+MCP가 제공하는 것은 "접근 능력"
+- GitHub MCP 서버를 연결하면 에이전트는 이슈를 읽고, PR을 만들고, 코멘트를 달 수 있게 된다
+- 하지만 "우리 팀의 코드 리뷰 프로세스"는 알지 못한다
+
+실제 업무에서 가치를 만드는 것은 단순한 도구 접근이 아니라, 그 도구를 특정 맥락에서 어떻게 조합하여 사용하는가에 대한 지식
+- GitHub에 접속할 수 있다고 해서, "이 팀에서는 PR에 반드시 테스트 계획을 포함해야 한다"는 것을 아는 것은 아니다
+- Grafana에 쿼리를 날릴 수 있다고 해서, "API 레이턴시 이상을 발견하면 먼저 배포 이력을 확인하고, 에러 로그와 상관관계를 분석하라"는 절차를 아는 것은 아니다
+- JIRA에 이슈를 만들 수 있다고 해서, "스토리 포인트는 최대 2이며, 초과 시 반드시 분할해야 한다"는 팀 규칙을 아는 것은 아니다.
+
+Skills는 이 간극을 메운다. 도구에 대한 접근은 MCP가 담당하고, 그 도구를 팀의 맥락과 워크플로우에 맞게 오케스트레이션하는 것은 Skills가 담당
+
+### 6.3 반복 가능한 워크플로우의 필요성
+
+소프트웨어 개발에서 많은 작업은 반복적
+- 코드 리뷰, 배포, 이슈 분류, 인시던트 대응 등은 매번 비슷한 패턴을 따른다
+- MCP만으로는 이런 반복적 워크플로우를 캡슐화할 수 없다
+- 매번 에이전트에게 "먼저 이것을 하고, 그 다음 이것을 하고..."라고 설명해야 한다
+
+Skills는 이 워크플로우를 한 번 정의하면 `/skill-name` 한 번의 호출로 재사용할 수 있게 한다
+- 이것은 단순한 편의성의 문제가 아니라 **일관성**의 문제이다
+- 동일한 작업을 매번 다른 방식으로 수행하면 결과의 품질이 들쭉날쭉해진다
+- Skills는 베스트 프랙티스를 인코딩하여 일관된 품질을 보장
+
+### 6.4 조직 지식의 코드화
+
+기업에는 명시적으로 문서화되지 않은 암묵적 지식이 많다
+- "이 API는 절대 프로덕션에서 직접 호출하면 안 된다"
+- "이 컴포넌트를 수정할 때는 반드시 이 테스트를 돌려야 한다"
+- "PR 머지 전에 반드시 Ops 팀의 승인을 받아야 한다"
+
+MCP는 이런 지식을 담을 곳이 없다
+- MCP 도구 정의에 넣기에는 범위가 맞지 않고
+- 시스템 프롬프트에 넣기에는 항상 로드되는 비용이 너무 크다
+
+Skills의 SKILL.md는 이런 조직 지식을 자연어로 문서화하면서 동시에 AI 에이전트가 실행 가능한 형태로 만든다
+- 기술 문서이면서 동시에 실행 가능한 워크플로우인 것이다
+- 그리고 Git으로 버전 관리되므로, 프로세스의 변경 이력도 추적할 수 있다
+
+### 6.5 보안과 제어의 정밀성
+
+MCP의 보안 문제는 2025~2026년에 지속적으로 지적되었다
+- 인증 미비, 과도한 권한 부여, 프롬프트 인젝션 취약점, OAuth 토큰 노출 등이 보고되었다
+
+Skills는 보안에 더 정밀한 접근을 제공한다:
+
+- **도구 제한**: `allowed-tools` 필드로 스킬 실행 시 사용 가능한 도구를 명시적으로 제한할 수 있다
+    - 분석 스킬에서 파일 수정 도구를 차단하거나
+    - 배포 스킬에서 읽기 도구만 허용하는 등 최소 권한 원칙을 적용할 수 있다
+- **호출 제어**: `disable-model-invocation: true`로 사이드 이펙트가 있는 스킬(배포, 메시지 전송 등)의 자동 호출을 방지한다
+    - 사용자가 명시적으로 `/deploy`를 입력해야만 실행된다
+- **범위 제한**: 스킬의 권한은 스킬 실행 중에만 적용되고, 스킬이 완료되면 해제된다
+
+### 6.6 에이전트 생태계의 분화와 전문화
+
+AI 에이전트 생태계가 성숙해지면서, "범용 어시스턴트"에서 "전문 에이전트"로의 분화가 가속화되고 있다
+- 코드 리뷰 에이전트, 인시던트 대응 에이전트, 데이터 분석 에이전트 등 특정 도메인에 특화된 에이전트가 등장하고 있다
+
+이 전문화를 가능하게 하는 것이 Skills이다
+- MCP만으로는 에이전트를 전문화하기 어렵다
+- MCP는 "이 에이전트가 무엇에 접근할 수 있는가"만 결정할 뿐, "이 에이전트가 어떻게 행동하는가"를 결정하지 않기 때문이다
+- Skills는 에이전트의 행동 방식 자체를 정의함으로써 진정한 전문화를 가능하게 한다
+
+---
+
+## 7. MCP와 Skills의 이상적인 협력 모델
+
+두 기술은 대체 관계가 아니라 스택의 서로 다른 레이어이다.
+
+```
+┌─────────────────────────────────────────────────┐
+│               사용자 요청                       │
+│        "지난 주 API 레이턴시를 분석해줘"        │
+└───────────────────┬─────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────┐
+│           Skills Layer (오케스트레이션)         │
+│                                                 │
+│  /grafana-weekly 스킬 활성화                    │
+│  1. 데이터소스 연결 확인                        │
+│  2. Prometheus에서 핵심 지표 조회               │
+│  3. Loki 로그와 상관관계 분석                   │
+│  4. 구조화된 보고서 작성                        │
+└───────────────────┬─────────────────────────────┘
+                    │ 스킬이 MCP 도구를 호출
+                    ▼
+┌─────────────────────────────────────────────────┐
+│           MCP Layer (연결)                      │
+│                                                 │
+│  Grafana MCP: list_datasources()                │
+│  Grafana MCP: query_prometheus(...)             │
+│  Grafana MCP: query_loki(...)                   │
+└───────────────────┬─────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────┐
+│           외부 시스템                           │
+│  Prometheus │ Loki │ Grafana Dashboard          │
+└─────────────────────────────────────────────────┘
+```
+
+이 모델에서:
+- **MCP**는 Grafana, Prometheus, Loki에 대한 연결과 쿼리 능력을 제공
+- **Skills**는 이 도구들을 어떤 순서로, 어떤 패턴으로 사용해야 하는지를 정의
+- 에이전트는 Skills의 지침을 따라 MCP 도구를 조합하여 작업을 수행
+
+---
+
+## 8. 선택 가이드: 언제 무엇을 사용할 것인가
+
+### MCP를 선택해야 할 때
+
+- AI 에이전트가 **새로운 외부 시스템에 접근**해야 할 때 (데이터베이스, SaaS, 파일 시스템)
+- **실시간 데이터 조회**가 필요할 때 (라이브 메트릭, 현재 이슈 상태)
+- 특정 작업이 **단일 도구 호출**로 완결될 때 (파일 읽기, 쿼리 실행)
+- 에이전트가 **자율적으로 판단**하여 도구를 선택해야 할 때
+
+### Skills를 선택해야 할 때
+
+- **멀티스텝 워크플로우**를 반복적으로 수행해야 할 때
+- **도메인 전문 지식**이나 **팀 규칙**을 에이전트에 전달해야 할 때
+- 에이전트의 **행동 방식**을 특정 맥락에 맞게 변경해야 할 때
+- **코드 리뷰, 배포, 인시던트 대응** 등 정형화된 프로세스를 자동화할 때
+- 프로그래밍 없이 **자연어로** 에이전트 확장을 정의하고 싶을 때
+
+### 함께 사용해야 할 때
+
+- 외부 데이터를 가져와서(MCP) **특정 분석 패턴으로 처리**(Skills)해야 할 때
+- 여러 외부 서비스를(MCP) **정해진 워크플로우에 따라 조합**(Skills)해야 할 때
+- 이 프로젝트의 `/grafana-weekly`처럼, 데이터 접근(Grafana MCP)과 분석 절차(Skills)가 모두 필요할 때
+
+---
+
+## Sources
+
+- [Skills explained: How Skills compares to prompts, Projects, MCP, and subagents](https://claude.com/blog/skills-explained) — Anthropic 공식 비교 문서
+- [MCPs vs Agent Skills: Understanding the Difference](https://www.damiangalarza.com/posts/2026-02-05-mcps-vs-agent-skills/) — 아키텍처 심층 비교
+- [Extend Claude with skills](https://code.claude.com/docs/en/skills) — Claude Code 공식 Skills 문서
+- [Agent Skills Specification](https://agentskills.io/specification) — 개방형 표준 스펙
+- [Claude Agent Skills: A First Principles Deep Dive](https://leehanchung.github.io/blogs/2025/10/26/claude-skills-deep-dive/) — 내부 구조 분석
+- [Your MCP Server Is Eating Your Context Window](https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative) — MCP 토큰 소비 문제 분석
+- [Six Fatal Flaws of the Model Context Protocol](https://www.scalifiai.com/blog/model-context-protocol-flaws-2025) — MCP 한계점 분석
+- [Optimizing AI Context: Why Replacing MCP with Shell Scripts Saves 22,000 Tokens](https://earezki.com/ai-news/2026-04-01-the-22000-token-tax-why-i-killed-my-mcp-server/) — 토큰 절약 사례
+- [Reducing MCP token usage by 100x](https://www.speakeasy.com/blog/how-we-reduced-token-usage-by-100x-dynamic-toolsets-v2) — Dynamic Toolsets 접근
+- [Anthropic Opens Agent Skills Standard](https://www.unite.ai/anthropic-opens-agent-skills-standard-continuing-its-pattern-of-building-industry-infrastructure/) — 표준화 전략 분석
